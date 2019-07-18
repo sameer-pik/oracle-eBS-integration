@@ -1,0 +1,116 @@
+CREATE OR REPLACE PROCEDURE ap_inv_auto_approval (p_invoice_id IN NUMBER)
+IS
+   v_hist_id                 NUMBER;
+   v_user_id                 NUMBER;
+   v_login_id                NUMBER;
+   v_user_name               VARCHAR2 (150)                  := 'SYSTEM-USER';
+   v_validation_status       VARCHAR2 (50);
+   v_stop_approval_result    BOOLEAN;
+   v_hist_rec                ap_inv_aprvl_hist_all%ROWTYPE;
+   v_org_id                  ap_invoices_all.org_id%TYPE;
+   v_invoice_amount          ap_invoices_all.invoice_amount%TYPE;
+   v_validation_request_id   ap_invoices_all.validation_request_id%TYPE;
+   v_wfapproval_status       ap_invoices_all.wfapproval_status%TYPE;
+BEGIN
+   BEGIN
+      SELECT org_id, invoice_amount, wfapproval_status
+        INTO v_org_id, v_invoice_amount, v_wfapproval_status
+        FROM ap_invoices_all
+       WHERE invoice_id = p_invoice_id;
+
+      SELECT user_id
+        INTO v_user_id
+        FROM fnd_user
+       WHERE user_name = v_user_name;
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         fnd_file.put_line (fnd_file.LOG,
+                            'Exception in select block-' || SQLERRM
+                           );
+         DBMS_OUTPUT.put_line ('Exception in select block-' || SQLERRM);
+   END;
+
+   BEGIN
+      v_validation_status :=
+         apps.ap_invoices_pkg.get_approval_status (p_invoice_id,
+                                                   NULL,
+                                                   NULL,
+                                                   NULL
+                                                  );
+   EXCEPTION
+      WHEN OTHERS
+      THEN
+         fnd_file.put_line
+                        (fnd_file.LOG,
+                            'Exception retrieving invoice validation status-'
+                         || SQLERRM
+                        );
+         DBMS_OUTPUT.put_line
+                         (   'Exception retrieving invoice validation status-'
+                          || SQLERRM
+                         );
+   END;
+
+   IF (UPPER (v_validation_status) <> 'APPROVED')
+   THEN
+      fnd_file.put_line (fnd_file.LOG, 'Invoice is not validated');
+      DBMS_OUTPUT.put_line ('Invoice is not validated');
+   ELSE
+      /*set values for manual approval*/
+      IF (v_wfapproval_status = 'INITIATED')
+      THEN
+         v_stop_approval_result :=
+            ap_workflow_pkg.stop_approval
+                               (p_invoice_id,
+                                NULL,
+                                'INV_SUM_ACTIONS_WFAPPROVE.do_force_approval'
+                               );
+
+         --Bug5527190
+         IF v_stop_approval_result = TRUE
+         THEN
+            fnd_file.put_line
+                             (fnd_file.LOG,
+                              'Invoice approval workflow is forcibly stopped'
+                             );
+            DBMS_OUTPUT.put_line
+                              ('Invoice approval workflow is forcibly stopped');
+         END IF;
+      END IF;
+
+      UPDATE ap_invoices_all
+         SET wfapproval_status = 'MANUALLY APPROVED'
+       WHERE invoice_id = p_invoice_id;
+
+      UPDATE ap_invoice_lines_all
+         SET wfapproval_status = 'MANUALLY APPROVED'
+       WHERE invoice_id = p_invoice_id;
+
+      --insert into the history table
+      v_hist_rec.history_type := 'DOCUMENTAPPROVAL';
+      v_hist_rec.invoice_id := p_invoice_id;
+      v_hist_rec.iteration := 0;
+      v_hist_rec.org_id := v_org_id;
+      v_hist_rec.approver_name := v_user_name;
+      v_hist_rec.amount_approved := v_invoice_amount;
+      v_hist_rec.created_by := v_user_id;
+      v_hist_rec.last_updated_by := v_user_id;
+      v_hist_rec.last_update_login := -1;
+      v_hist_rec.creation_date := SYSDATE;
+      v_hist_rec.last_update_date := SYSDATE;
+      v_hist_rec.response := 'MANUALLY APPROVED';
+      v_hist_rec.approver_comments := 'System Auto Approved';
+      ap_workflow_pkg.insert_history_table (v_hist_rec);
+      COMMIT;
+   END IF;
+EXCEPTION
+   WHEN OTHERS
+   THEN
+      fnd_file.put_line (fnd_file.LOG,
+                         'Exception in auto approval main block-' || SQLERRM
+                        );
+      DBMS_OUTPUT.put_line ('Exception in auto approval main block-'
+                            || SQLERRM
+                           );
+END ap_inv_auto_approval;
